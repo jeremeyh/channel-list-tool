@@ -1,20 +1,16 @@
 {
   "name": "channel-list-tool",
   "version": "1.0.0",
-  "description": "Independent Slack app: /channel-list command to list channels for one or two users using Admin API",
-  "type": "module",
-  "main": "src/app.js",
+  "description": "Slack /channel-list via Socket Mode on Render",
+  "main": "app.js",
   "scripts": {
-    "start": "PORT=0 nodemon src/app.js",
-    "dev": "PORT=0 nodemon src/app.js",
-    "tunnel:update": "./update-env.sh",
-    "tunnel": "PORT=${PORT:-0} ./update-env.sh"
+    "start": "node app.js",
+    "dev": "nodemon app.js"
   },
   "dependencies": {
     "@slack/bolt": "^3.17.0",
     "@slack/web-api": "^7.0.0",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2"
+    "dotenv": "^16.4.5"
   },
   "devDependencies": {
     "nodemon": "^3.1.0"
