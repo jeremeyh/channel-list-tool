@@ -1,201 +1,114 @@
-// Load environment variables from .env file
+// app.js — Slack App (Socket Mode on Render as Background Worker)
 require('dotenv').config();
-
-// Import the Bolt framework
 const { App } = require('@slack/bolt');
 
-// Initialize your app with your bot token and signing secret
+/**
+ * Socket Mode requires an App-Level Token (xapp-...) with scope `connections:write`.
+ * Deploy on Render as a Background Worker. No HTTP server, no PORT binding.
+ * 
+ * ENV VARS required:
+ * - SLACK_BOT_TOKEN  (xoxb-...)
+ * - SLACK_APP_TOKEN  (xapp-... with connections:write)
+ */
+
 const app = new App({
-  signingSecret: process.env.SLACK_SIGNING_SECRET,
-  token: process.env.SLACK_BOT_TOKEN
+  token: process.env.SLACK_BOT_TOKEN,
+  appToken: process.env.SLACK_APP_TOKEN,
+  socketMode: true
 });
 
-// A helper function to find the user ID from a mention string (e.g., "<@U123456789>")
+// ---------- Helpers ----------
 const extractUserId = (mention) => {
-  // Regex to match a Slack user ID from a mention string
   const match = mention.match(/<@([A-Z0-9]+)>/);
   return match ? match[1] : null;
 };
 
-// Listen for the /channel-list slash command
+// ---------- Slash Command: /channel-list ----------
 app.command('/channel-list', async ({ ack, say, command }) => {
-  // Acknowledge the command right away to prevent a timeout error
   await ack();
 
   try {
-    // Trim the text from the command and split it by spaces
-    const users = command.text.trim().split(/\s+/);
-    
-    // An array to store the IDs of the users to be processed
-    const userIds = users.map(extractUserId).filter(id => id !== null);
+    const users = (command.text || '').trim().split(/\s+/).filter(Boolean);
+    const userIds = users.map(extractUserId).filter(Boolean);
 
-    // If no users are mentioned, respond with the usage hint
-    if (userIds.length === 0) {
+    if (userIds.length === 0 || userIds.length > 2) {
       await say({
-        blocks: [
-          {
-            type: "section",
-            text: {
-              type: "mrkdwn",
-              text: `Please specify one or two users to get their channel list. \n\n*Usage:* \`/channel-list @user1 [@user2]\``
-            }
+        blocks: [{
+          type: "section",
+          text: { type: "mrkdwn",
+            text: `Please specify *one or two* users.\n\n*Usage:* \`/channel-list @user1 [@user2]\``
           }
-        ],
-        text: `Please specify one or two users to get their channel list. Usage: /channel-list @user1 [@user2]`
+        }],
+        text: `Please specify one or two users. Usage: /channel-list @user1 [@user2]`
       });
       return;
     }
 
-    // Get the user information for all mentioned users
     const userInfo = await Promise.all(userIds.map(async (id) => {
       const response = await app.client.users.info({ user: id });
       return response.user;
     }));
 
-    // Function to fetch all channels a user is in, handling pagination
     const fetchUserChannels = async (userId) => {
-      let allChannels = [];
-      let cursor = null;
+      let all = []; let cursor;
       do {
-        const result = await app.client.users.conversations({
+        const res = await app.client.users.conversations({
           user: userId,
           types: 'public_channel,private_channel',
-          limit: 100, // Fetch up to 100 channels at a time
-          cursor: cursor
+          limit: 100,
+          cursor
         });
-        allChannels = allChannels.concat(result.channels);
-        cursor = result.response_metadata ? result.response_metadata.next_cursor : null;
+        all = all.concat(res.channels || []);
+        cursor = res.response_metadata?.next_cursor || null;
       } while (cursor);
-      return allChannels;
+      return all;
     };
 
-    // --- Scenario 1: One User ---
     if (userIds.length === 1) {
-      const user1Info = userInfo[0];
-      const channels = await fetchUserChannels(user1Info.id);
-      
-      // Build a simple markdown list of all channels
-      const channelList = channels.map(c => `- #${c.name}`).join('\n');
-      
-      const messageBlocks = [
-        {
+      const [u1] = userInfo;
+      const ch = await fetchUserChannels(u1.id);
+      const list = ch.map(c => `- <#${c.id}|${c.name}>`).join('\n');
+      await say({
+        blocks: [{
           type: "section",
-          text: {
-            type: "mrkdwn",
-            text: `*Here is the list of channels for ${user1Info.real_name}:*\n\nTotal Channels: ${channels.length}\n\n${channelList}`
+          text: { type: "mrkdwn",
+            text: `*Channels for ${u1.real_name || u1.name}:*\n\n*Total:* ${ch.length}\n\n${list || '_No channels found._'}`
           }
-        }
-      ];
-
-      await say({ blocks: messageBlocks, text: `Channel list for ${user1Info.real_name}.` });
-    } 
-    // --- Scenario 2: Two Users ---
-    else if (userIds.length === 2) {
-      const user1Info = userInfo[0];
-      const user2Info = userInfo[1];
-
-      // Fetch channels for both users concurrently
-      const [channels1, channels2] = await Promise.all([
-        fetchUserChannels(user1Info.id),
-        fetchUserChannels(user2Info.id)
-      ]);
-
-      const channels1Ids = new Set(channels1.map(c => c.id));
-      const channels2Ids = new Set(channels2.map(c => c.id));
-
-      const sharedChannels = channels1.filter(c => channels2Ids.has(c.id));
-      const user1UniqueChannels = channels1.filter(c => !channels2Ids.has(c.id));
-      const user2UniqueChannels = channels2.filter(c => !channels1Ids.has(c.id));
-
-      const getChannelText = (channel) => {
-        const link = `<#${channel.id}|${channel.name}>`;
-        return `- ${link}`;
-      };
-
-      const sharedChannelList = sharedChannels.length > 0
-        ? sharedChannels.map(getChannelText).join('\n')
-        : "No shared channels found.";
-      
-      const user1UniqueList = user1UniqueChannels.length > 0
-        ? user1UniqueChannels.map(getChannelText).join('\n')
-        : `${user1Info.real_name} has no unique channels.`;
-        
-      const user2UniqueList = user2UniqueChannels.length > 0
-        ? user2UniqueChannels.map(getChannelText).join('\n')
-        : `${user2Info.real_name} has no unique channels.`;
-        
-      const messageBlocks = [
-        {
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text: `*Channel Membership Report for ${user1Info.real_name} and ${user2Info.real_name}*`
-          }
-        },
-        {
-          type: "divider"
-        },
-        {
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text: `*Total Channels:* ${channels1.length} for ${user1Info.real_name}, ${channels2.length} for ${user2Info.real_name}\n*Shared Channels:* ${sharedChannels.length}\n*Unique Channels:* ${user1UniqueChannels.length} for ${user1Info.real_name}, ${user2UniqueChannels.length} for ${user2Info.real_name}`
-          }
-        },
-        {
-          type: "divider"
-        },
-        {
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text: `*Shared Channels*\n${sharedChannelList}`
-          }
-        },
-        {
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text: `*Channels Unique to ${user1Info.real_name}*\n${user1UniqueList}`
-          }
-        },
-        {
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text: `*Channels Unique to ${user2Info.real_name}*\n${user2UniqueList}`
-          }
-        }
-      ];
-
-      await say({ blocks: messageBlocks, text: "Channel membership report." });
+        }],
+        text: `Channel list for ${u1.real_name || u1.name}.`
+      });
     } else {
-      // More than two users mentioned
+      const [u1, u2] = userInfo;
+      const [c1, c2] = await Promise.all([fetchUserChannels(u1.id), fetchUserChannels(u2.id)]);
+      const s1 = new Set(c1.map(c => c.id));
+      const s2 = new Set(c2.map(c => c.id));
+      const shared = c1.filter(c => s2.has(c.id));
+      const u1Only = c1.filter(c => !s2.has(c.id));
+      const u2Only = c2.filter(c => !s1.has(c.id));
+      const link = (c) => `- <#${c.id}|${c.name}>`;
+
       await say({
         blocks: [
-          {
-            type: "section",
-            text: {
-              type: "mrkdwn",
-              text: `This command supports a maximum of two users. \n\n*Usage:* \`/channel-list @user1 [@user2]\``
-            }
-          }
+          { type: "section", text: { type: "mrkdwn", text: `*Channel Membership Report for ${u1.real_name || u1.name} and ${u2.real_name || u2.name}*` } },
+          { type: "divider" },
+          { type: "section", text: { type: "mrkdwn", text:
+            `*Totals:* ${c1.length} for ${u1.real_name || u1.name}, ${c2.length} for ${u2.real_name || u2.name}\n*Shared:* ${shared.length}\n*Unique:* ${u1Only.length} vs ${u2Only.length}` } },
+          { type: "divider" },
+          { type: "section", text: { type: "mrkdwn", text: `*Shared Channels*\n${shared.length ? shared.map(link).join('\n') : '_No shared channels found._'}` } },
+          { type: "section", text: { type: "mrkdwn", text: `*Unique to ${u1.real_name || u1.name}*\n${u1Only.length ? u1Only.map(link).join('\n') : `_${u1.real_name || u1.name} has no unique channels._`}` } },
+          { type: "section", text: { type: "mrkdwn", text: `*Unique to ${u2.real_name || u2.name}*\n${u2Only.length ? u2Only.map(link).join('\n') : `_${u2.real_name || u2.name} has no unique channels._`}` } }
         ],
-        text: "This command supports a maximum of two users."
+        text: "Channel membership report."
       });
     }
-
-  } catch (error) {
-    console.error(`Failed to execute command: ${error}`);
-    await say({
-      text: `An error occurred while processing your request. Please check the permissions and try again. Error: ${error.message}`
-    });
+  } catch (err) {
+    console.error(err);
+    await say({ text: `An error occurred: ${err.message}` });
   }
 });
 
+// ---------- Start Socket Mode (no PORT) ----------
 (async () => {
-  // Start the app
-  await app.start(process.env.PORT || 3000);
-
-  console.log('⚡️ Bolt app is running!');
+  await app.start();
+  console.log('⚡️ Socket Mode app is running');
 })();
